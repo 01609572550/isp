@@ -218,6 +218,14 @@ label { display: grid; gap: 0.45rem; color: var(--muted); font-weight: 700; font
   font-weight: 800;
 }
 
+.sidebar-brand .sync-status[data-mode="error"] {
+  color: var(--danger);
+}
+
+.sidebar-brand .sync-status[data-mode="success"] {
+  color: var(--ok);
+}
+
 .nav-list { display: grid; gap: 0.45rem; }
 .nav-link {
   width: 100%;

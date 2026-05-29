@@ -117,9 +117,20 @@
     els.syncStatus.dataset.mode = mode;
   }
 
+  function cloudErrorText(error) {
+    const code = error?.code || "";
+    const message = error?.message || "";
+    if (window.firebaseScriptFailed || !window.firebase) return "Firebase script blocked";
+    if (code.includes("permission-denied") || message.includes("Missing or insufficient permissions")) return "Fix Firestore Rules";
+    if (code.includes("unavailable")) return "Cloud unavailable";
+    if (code.includes("not-found") || message.includes("NOT_FOUND")) return "Create Firestore DB";
+    if (message.includes("client is offline")) return "Internet/Firebase offline";
+    return "Cloud setup error";
+  }
+
   function initCloudSync() {
     if (!window.firebase || !window.firebase.firestore) {
-      setSyncStatus("Local mode");
+      setSyncStatus(window.firebaseScriptFailed ? "Firebase script blocked" : "Local mode", "error");
       return;
     }
 
@@ -136,7 +147,7 @@
             writeCloud(localPayload);
           }
           state.cloudReady = true;
-          setSyncStatus("Cloud connected");
+          setSyncStatus("Cloud connected", "success");
           return;
         }
 
@@ -158,14 +169,16 @@
           writeCloud(getDataPayload());
         }
 
-        setSyncStatus("Cloud synced");
-      }, () => {
+        setSyncStatus("Cloud synced", "success");
+      }, (error) => {
         state.cloudReady = false;
-        setSyncStatus("Cloud offline");
+        const message = cloudErrorText(error);
+        setSyncStatus(message, "error");
+        toast(`${message}. Local backup is still saved.`, "error");
       });
     } catch (error) {
       state.cloudReady = false;
-      setSyncStatus("Local mode");
+      setSyncStatus(cloudErrorText(error), "error");
     }
   }
 
@@ -192,11 +205,12 @@
       updatedAt: firebase.firestore.FieldValue.serverTimestamp()
     }, { merge: true }).then(() => {
       state.cloudReady = true;
-      setSyncStatus("Cloud synced");
-    }).catch(() => {
+      setSyncStatus("Cloud synced", "success");
+    }).catch((error) => {
       state.cloudReady = false;
-      setSyncStatus("Cloud failed");
-      toast("Cloud sync failed. Local backup is still saved.", "error");
+      const message = cloudErrorText(error);
+      setSyncStatus(message, "error");
+      toast(`${message}. Local backup is still saved.`, "error");
     });
   }
 

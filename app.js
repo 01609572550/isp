@@ -1,10 +1,14 @@
 (function () {
   "use strict";
 
-  const ADMIN_PASSWORD = "7520";
-  const STAFF_PASSWORD = "1133";
+  const ADMIN_PASSWORD_HASH = "5616b00748424b555643e35b623f2e82430dc57e936b0da684c5e64b295f00b8";
+  const STAFF_PASSWORD_HASH = "7a99d42d79e9bafeaa5ccedaf0135267da4ccd197a99131a8cf15025cb54ab18";
   const STORAGE_KEY = "ispBillingManagerData";
   const SESSION_KEY = "ispBillingManagerSession";
+  const LOGIN_GUARD_KEY = "ispBillingManagerLoginGuard";
+  const SESSION_HOURS = 8;
+  const MAX_LOGIN_ATTEMPTS = 5;
+  const LOCKOUT_MINUTES = 10;
   const FIREBASE_CONFIG = {
     apiKey: "AIzaSyBi_P7V5go_MEnxwEp3IAyaa9ZBhhGjILU",
     authDomain: "isp-billing-manager.firebaseapp.com",
@@ -28,7 +32,9 @@
     filters: { search: "", status: "all", sort: "name", history: "" },
     db: null,
     cloudDoc: null,
+    cloudUnsubscribe: null,
     cloudReady: false,
+    authReady: false,
     applyingRemote: false,
     syncTimer: null,
     lastSavedAt: null
@@ -129,57 +135,70 @@
   }
 
   function initCloudSync() {
-    if (!window.firebase || !window.firebase.firestore) {
+    if (!window.firebase || !window.firebase.firestore || !window.firebase.auth) {
       setSyncStatus(window.firebaseScriptFailed ? "Firebase script blocked" : "Local mode", "error");
       return;
     }
 
     try {
       if (!firebase.apps.length) firebase.initializeApp(FIREBASE_CONFIG);
-      state.db = firebase.firestore();
-      state.cloudDoc = state.db.collection(CLOUD_COLLECTION).doc(CLOUD_DOCUMENT);
-      setSyncStatus("Connecting cloud...");
-
-      state.cloudDoc.onSnapshot((snapshot) => {
-        if (!snapshot.exists) {
-          const localPayload = getDataPayload();
-          if (localPayload.customers.length || localPayload.transactions.length || localPayload.cycles.length) {
-            writeCloud(localPayload);
-          }
-          state.cloudReady = true;
-          setSyncStatus("Cloud connected", "success");
-          return;
-        }
-
-        const cloudData = normalizeCloudData(snapshot.data());
-        const localTime = Date.parse(state.lastSavedAt || "1970-01-01");
-        const cloudTime = Date.parse(cloudData.lastSavedAt || "1970-01-01");
-        state.cloudReady = true;
-
-        if (cloudTime >= localTime) {
-          state.applyingRemote = true;
-          state.customers = cloudData.customers;
-          state.transactions = cloudData.transactions;
-          state.cycles = cloudData.cycles;
-          state.lastSavedAt = cloudData.lastSavedAt;
-          saveLocalOnly(cloudData);
-          renderAll();
-          state.applyingRemote = false;
-        } else {
-          writeCloud(getDataPayload());
-        }
-
-        setSyncStatus("Cloud synced", "success");
-      }, (error) => {
+      setSyncStatus("Securing cloud...");
+      firebase.auth().signInAnonymously().then(() => {
+        state.authReady = true;
+        state.db = firebase.firestore();
+        state.cloudDoc = state.db.collection(CLOUD_COLLECTION).doc(CLOUD_DOCUMENT);
+        subscribeCloud();
+      }).catch((error) => {
         state.cloudReady = false;
-        const message = cloudErrorText(error);
-        setSyncStatus(message, "error");
-        toast(`${message}. Local backup is still saved.`, "error");
+        setSyncStatus(cloudErrorText(error), "error");
       });
     } catch (error) {
       state.cloudReady = false;
       setSyncStatus(cloudErrorText(error), "error");
     }
+  }
+
+  function subscribeCloud() {
+    if (!state.cloudDoc) return;
+    if (state.cloudUnsubscribe) state.cloudUnsubscribe();
+    setSyncStatus("Connecting cloud...");
+
+    state.cloudUnsubscribe = state.cloudDoc.onSnapshot((snapshot) => {
+      if (!snapshot.exists) {
+        const localPayload = getDataPayload();
+        if (localPayload.customers.length || localPayload.transactions.length || localPayload.cycles.length) {
+          writeCloud(localPayload);
+        }
+        state.cloudReady = true;
+        setSyncStatus("Cloud connected", "success");
+        return;
+      }
+
+      const cloudData = normalizeCloudData(snapshot.data());
+      const localTime = Date.parse(state.lastSavedAt || "1970-01-01");
+      const cloudTime = Date.parse(cloudData.lastSavedAt || "1970-01-01");
+      state.cloudReady = true;
+
+      if (cloudTime >= localTime) {
+        state.applyingRemote = true;
+        state.customers = cloudData.customers;
+        state.transactions = cloudData.transactions;
+        state.cycles = cloudData.cycles;
+        state.lastSavedAt = cloudData.lastSavedAt;
+        saveLocalOnly(cloudData);
+        renderAll();
+        state.applyingRemote = false;
+      } else {
+        writeCloud(getDataPayload());
+      }
+
+      setSyncStatus("Cloud synced", "success");
+    }, (error) => {
+      state.cloudReady = false;
+      const message = cloudErrorText(error);
+      setSyncStatus(message, "error");
+      toast(`${message}. Local backup is still saved.`, "error");
+    });
   }
 
   function normalizeCloudData(data) {
@@ -216,7 +235,14 @@
 
   function getSession() {
     try {
-      return JSON.parse(localStorage.getItem(SESSION_KEY) || "null");
+      const session = JSON.parse(localStorage.getItem(SESSION_KEY) || "null");
+      if (!session) return null;
+      const expiresAt = Date.parse(session.expiresAt || "");
+      if (!expiresAt || Date.now() > expiresAt) {
+        clearSession();
+        return null;
+      }
+      return session;
     } catch (error) {
       clearSession();
       return null;
@@ -229,6 +255,52 @@
 
   function clearSession() {
     localStorage.removeItem(SESSION_KEY);
+  }
+
+  function getLoginGuard() {
+    try {
+      return JSON.parse(localStorage.getItem(LOGIN_GUARD_KEY) || "{}");
+    } catch (error) {
+      return {};
+    }
+  }
+
+  function setLoginGuard(guard) {
+    localStorage.setItem(LOGIN_GUARD_KEY, JSON.stringify(guard));
+  }
+
+  function clearLoginGuard() {
+    localStorage.removeItem(LOGIN_GUARD_KEY);
+  }
+
+  function isLockedOut() {
+    const guard = getLoginGuard();
+    return guard.lockedUntil && Date.now() < guard.lockedUntil;
+  }
+
+  function lockoutText() {
+    const guard = getLoginGuard();
+    const seconds = Math.ceil(((guard.lockedUntil || 0) - Date.now()) / 1000);
+    const minutes = Math.max(1, Math.ceil(seconds / 60));
+    return `Too many wrong attempts. Try again in ${minutes} minute(s).`;
+  }
+
+  function recordFailedLogin() {
+    const guard = getLoginGuard();
+    const attempts = Number(guard.attempts || 0) + 1;
+    if (attempts >= MAX_LOGIN_ATTEMPTS) {
+      setLoginGuard({ attempts, lockedUntil: Date.now() + LOCKOUT_MINUTES * 60 * 1000 });
+      toast(lockoutText(), "error");
+      return;
+    }
+    setLoginGuard({ attempts, lockedUntil: null });
+    toast(`Invalid password. ${MAX_LOGIN_ATTEMPTS - attempts} attempt(s) left.`, "error");
+  }
+
+  async function sha256(value) {
+    const data = new TextEncoder().encode(value);
+    const hashBuffer = await crypto.subtle.digest("SHA-256", data);
+    return Array.from(new Uint8Array(hashBuffer)).map((byte) => byte.toString(16).padStart(2, "0")).join("");
   }
 
   function calculateCustomer(customer) {
@@ -275,32 +347,41 @@
     renderAll();
   }
 
-  function handleLogin(event) {
+  async function handleLogin(event) {
     event.preventDefault();
+    if (isLockedOut()) {
+      toast(lockoutText(), "error");
+      return;
+    }
     const password = els.passwordInput.value.trim();
-    if (password === ADMIN_PASSWORD) {
-      const session = { role: "admin", user: "Shad", signedInAt: new Date().toISOString() };
+    const passwordHash = await sha256(password);
+    const expiresAt = new Date(Date.now() + SESSION_HOURS * 60 * 60 * 1000).toISOString();
+    if (passwordHash === ADMIN_PASSWORD_HASH) {
+      const session = { role: "admin", user: "Shad", signedInAt: new Date().toISOString(), expiresAt };
+      clearLoginGuard();
       setSession(session);
       els.passwordInput.value = "";
       showApp(session);
       toast("Welcome Shad");
       return;
     }
-    if (password === STAFF_PASSWORD) {
-      const session = { role: "staff", user: "Alif", signedInAt: new Date().toISOString() };
+    if (passwordHash === STAFF_PASSWORD_HASH) {
+      const session = { role: "staff", user: "Alif", signedInAt: new Date().toISOString(), expiresAt };
+      clearLoginGuard();
       setSession(session);
       els.passwordInput.value = "";
       showApp(session);
       toast("Welcome Alif");
       return;
     }
-    toast("Invalid password.", "error");
+    recordFailedLogin();
   }
 
   function setView(name) {
     if (state.role === "staff" && ["dashboard", "billing", "reports"].includes(name)) name = "customers";
     $$(".view").forEach((view) => view.classList.toggle("active", view.id === `${name}View`));
     $$(".nav-link").forEach((link) => link.classList.toggle("active", link.dataset.view === name));
+    $$(".mobile-nav-link").forEach((link) => link.classList.toggle("active", link.dataset.view === name));
     $(".sidebar").classList.remove("open");
   }
 
@@ -374,19 +455,19 @@
     els.customerTable.innerHTML = customers.length ? customers.map((c) => `
       <tr>
         <td><strong>${escapeHtml(c.name)}</strong><br><small>${escapeHtml(c.address)}</small></td>
-        <td>${escapeHtml(c.phone)}</td>
-        <td>${money(c.monthlyBill)}</td>
-        <td>${money(c.discount)}</td>
-        <td>${money(c.previousDue)}</td>
-        <td><strong>${money(c.totalBill)}</strong></td>
-        <td>${money(c.paidAmount)}</td>
-        <td><strong>${money(c.currentDue)}</strong></td>
-        <td>
+        <td data-label="Phone">${escapeHtml(c.phone)}</td>
+        <td data-label="Monthly">${money(c.monthlyBill)}</td>
+        <td data-label="Discount">${money(c.discount)}</td>
+        <td data-label="Prev Due">${money(c.previousDue)}</td>
+        <td data-label="Total Bill"><strong>${money(c.totalBill)}</strong></td>
+        <td data-label="Paid">${money(c.paidAmount)}</td>
+        <td data-label="Current Due"><strong>${money(c.currentDue)}</strong></td>
+        <td data-label="Status">
           <select class="status-select" data-status-id="${c.id}">
             ${["Active", "Hold", "Inactive"].map((status) => `<option ${c.status === status ? "selected" : ""}>${status}</option>`).join("")}
           </select>
         </td>
-        <td>
+        <td data-label="Actions">
           <div class="row-actions">
             <button class="secondary-btn" data-pay-id="${c.id}">Pay</button>
             ${state.role === "admin" ? `<button class="secondary-btn" data-edit-id="${c.id}">Edit</button><button class="danger-btn" data-delete-id="${c.id}">Delete</button>` : ""}
@@ -686,6 +767,7 @@
       $("#themeToggle").textContent = document.body.classList.contains("dark") ? "Light Mode" : "Dark Mode";
     });
     $$(".nav-link").forEach((link) => link.addEventListener("click", () => setView(link.dataset.view)));
+    $$(".mobile-nav-link").forEach((link) => link.addEventListener("click", () => setView(link.dataset.view)));
     $$("[data-view-jump]").forEach((button) => button.addEventListener("click", () => setView(button.dataset.viewJump)));
     $("#addCustomerBtn").addEventListener("click", () => openCustomerModal());
     $("#cycleBtn").addEventListener("click", runMonthlyCycle);

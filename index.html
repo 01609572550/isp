@@ -27,6 +27,7 @@
           <input id="passwordInput" type="password" inputmode="numeric" autocomplete="current-password" placeholder="Enter password" required />
           <button type="button" id="togglePassword" class="icon-btn" aria-label="Show password">Show</button>
         </div>
+        <p id="loginSecurityText" class="security-text">Protected login with attempt limit and session timeout.</p>
         <button class="primary-btn" type="submit">Login</button>
       </form>
     </section>
@@ -53,6 +54,13 @@
         <button id="logoutBtn" class="danger-btn" type="button">Logout</button>
       </div>
     </aside>
+
+    <nav class="mobile-nav" aria-label="Mobile navigation">
+      <button class="mobile-nav-link active" data-view="dashboard">Dashboard</button>
+      <button class="mobile-nav-link" data-view="customers">Customers</button>
+      <button class="mobile-nav-link admin-only" data-view="billing">Billing</button>
+      <button class="mobile-nav-link admin-only" data-view="reports">Reports</button>
+    </nav>
 
     <section class="workspace">
       <header class="topbar">
@@ -231,6 +239,7 @@
 
   <div id="toastHost" class="toast-host" aria-live="polite"></div>
   <script src="https://www.gstatic.com/firebasejs/10.12.5/firebase-app-compat.js" onerror="window.firebaseScriptFailed=true"></script>
+  <script src="https://www.gstatic.com/firebasejs/10.12.5/firebase-auth-compat.js" onerror="window.firebaseScriptFailed=true"></script>
   <script src="https://www.gstatic.com/firebasejs/10.12.5/firebase-firestore-compat.js" onerror="window.firebaseScriptFailed=true"></script>
   <script src="app.js"></script>
 </body>

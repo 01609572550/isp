@@ -5,6 +5,16 @@
   const STAFF_PASSWORD = "1133";
   const STORAGE_KEY = "ispBillingManagerData";
   const SESSION_KEY = "ispBillingManagerSession";
+  const FIREBASE_CONFIG = {
+    apiKey: "AIzaSyBi_P7V5go_MEnxwEp3IAyaa9ZBhhGjILU",
+    authDomain: "isp-billing-manager.firebaseapp.com",
+    projectId: "isp-billing-manager",
+    storageBucket: "isp-billing-manager.firebasestorage.app",
+    messagingSenderId: "168891910826",
+    appId: "1:168891910826:web:6654e525b3847eab3b5ed3"
+  };
+  const CLOUD_COLLECTION = "ispBillingManager";
+  const CLOUD_DOCUMENT = "sharedData";
 
   const state = {
     role: null,
@@ -15,7 +25,13 @@
     editingId: null,
     paymentCustomerId: null,
     lastReceipt: null,
-    filters: { search: "", status: "all", sort: "name", history: "" }
+    filters: { search: "", status: "all", sort: "name", history: "" },
+    db: null,
+    cloudDoc: null,
+    cloudReady: false,
+    applyingRemote: false,
+    syncTimer: null,
+    lastSavedAt: null
   };
 
   const $ = (selector) => document.querySelector(selector);
@@ -30,6 +46,7 @@
     togglePassword: $("#togglePassword"),
     welcomeText: $("#welcomeText"),
     roleBadge: $("#roleBadge"),
+    syncStatus: $("#syncStatus"),
     dateTimeText: $("#dateTimeText"),
     customerTable: $("#customerTable"),
     customerModal: $("#customerModal"),
@@ -71,14 +88,116 @@
     state.customers = Array.isArray(stored.customers) ? stored.customers : [];
     state.transactions = Array.isArray(stored.transactions) ? stored.transactions : [];
     state.cycles = Array.isArray(stored.cycles) ? stored.cycles : [];
+    state.lastSavedAt = stored.lastSavedAt || null;
   }
 
   function saveData() {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify({
+    state.lastSavedAt = new Date().toISOString();
+    const payload = getDataPayload();
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(payload));
+    queueCloudSave(payload);
+  }
+
+  function saveLocalOnly(payload) {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(payload));
+  }
+
+  function getDataPayload() {
+    return {
       customers: state.customers,
       transactions: state.transactions,
-      cycles: state.cycles
-    }));
+      cycles: state.cycles,
+      lastSavedAt: state.lastSavedAt || new Date().toISOString()
+    };
+  }
+
+  function setSyncStatus(message, mode = "info") {
+    if (!els.syncStatus) return;
+    els.syncStatus.textContent = message;
+    els.syncStatus.dataset.mode = mode;
+  }
+
+  function initCloudSync() {
+    if (!window.firebase || !window.firebase.firestore) {
+      setSyncStatus("Local mode");
+      return;
+    }
+
+    try {
+      if (!firebase.apps.length) firebase.initializeApp(FIREBASE_CONFIG);
+      state.db = firebase.firestore();
+      state.cloudDoc = state.db.collection(CLOUD_COLLECTION).doc(CLOUD_DOCUMENT);
+      setSyncStatus("Connecting cloud...");
+
+      state.cloudDoc.onSnapshot((snapshot) => {
+        if (!snapshot.exists) {
+          const localPayload = getDataPayload();
+          if (localPayload.customers.length || localPayload.transactions.length || localPayload.cycles.length) {
+            writeCloud(localPayload);
+          }
+          state.cloudReady = true;
+          setSyncStatus("Cloud connected");
+          return;
+        }
+
+        const cloudData = normalizeCloudData(snapshot.data());
+        const localTime = Date.parse(state.lastSavedAt || "1970-01-01");
+        const cloudTime = Date.parse(cloudData.lastSavedAt || "1970-01-01");
+        state.cloudReady = true;
+
+        if (cloudTime >= localTime) {
+          state.applyingRemote = true;
+          state.customers = cloudData.customers;
+          state.transactions = cloudData.transactions;
+          state.cycles = cloudData.cycles;
+          state.lastSavedAt = cloudData.lastSavedAt;
+          saveLocalOnly(cloudData);
+          renderAll();
+          state.applyingRemote = false;
+        } else {
+          writeCloud(getDataPayload());
+        }
+
+        setSyncStatus("Cloud synced");
+      }, () => {
+        state.cloudReady = false;
+        setSyncStatus("Cloud offline");
+      });
+    } catch (error) {
+      state.cloudReady = false;
+      setSyncStatus("Local mode");
+    }
+  }
+
+  function normalizeCloudData(data) {
+    return {
+      customers: Array.isArray(data?.customers) ? data.customers : [],
+      transactions: Array.isArray(data?.transactions) ? data.transactions : [],
+      cycles: Array.isArray(data?.cycles) ? data.cycles : [],
+      lastSavedAt: data?.lastSavedAt || null
+    };
+  }
+
+  function queueCloudSave(payload) {
+    if (state.applyingRemote || !state.cloudDoc) return;
+    clearTimeout(state.syncTimer);
+    setSyncStatus("Syncing...");
+    state.syncTimer = setTimeout(() => writeCloud(payload), 450);
+  }
+
+  function writeCloud(payload) {
+    if (!state.cloudDoc) return;
+    state.cloudDoc.set({
+      ...payload,
+      updatedAt: firebase.firestore.FieldValue.serverTimestamp()
+    }, { merge: true }).then(() => {
+      state.cloudReady = true;
+      setSyncStatus("Cloud synced");
+    }).catch(() => {
+      state.cloudReady = false;
+      setSyncStatus("Cloud failed");
+      toast("Cloud sync failed. Local backup is still saved.", "error");
+    });
   }
 
   function getSession() {
@@ -594,6 +713,7 @@
     loadData();
     bindEvents();
     initTheme();
+    initCloudSync();
     updateClock();
     setInterval(updateClock, 1000);
     const session = getSession();
